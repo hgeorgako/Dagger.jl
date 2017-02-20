@@ -67,6 +67,7 @@ end
 function lower_maps(expr)
     @match expr begin
         A_[idx__] => :(Iter($A, ($(map(lower_index, idx)...),)))
+        f_(arg_)   => :(Map($f, ($(lower_maps(arg)),)))
         f_(args__)  => :(Map($f, ($(reduce(vcat, [lower_maps(x) for x in args])...),)))
         x_ => :(ConstArg($x))
     end
@@ -103,6 +104,15 @@ function lower(expr, reductions)
     :(TensorOp($(lower_maps(lhs)), $rhs_lowered))
 end
 
+
+"""
+    top!(t::TensorOp)
+
+Perform a tensor operation
+"""
+function top!(x) x end
+
 macro top(expr, reductions=:nothing)
-    lower(expr, reductions) |> esc
+    :(top!($(lower(expr, reductions)))) |> esc
 end
+
