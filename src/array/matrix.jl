@@ -20,10 +20,10 @@ function size(x::Transpose)
 end
 
 ctranspose(x::LazyArray) = Transpose(ctranspose, x)
-ctranspose(x::AbstractChunk) = Thunk(ctranspose, (x,))
+ctranspose(x::AbstractChunk) = Thunk(ctranspose, x)
 
 transpose(x::LazyArray) = Transpose(transpose, x)
-transpose(x::AbstractChunk) = Thunk(transpose, (x,))
+transpose(x::AbstractChunk) = Thunk(transpose, x)
 
 function ctranspose(x::ArrayDomain{2})
     d = indexes(x)
@@ -34,37 +34,31 @@ function ctranspose(x::ArrayDomain{1})
     ArrayDomain(1, d[1])
 end
 
-function ctranspose(x::DomainSplit)
-    DomainSplit(head(x)', chunks(x)')
-end
-
 function _ctranspose(x::AbstractArray)
     Any[x[j,i]' for i=1:size(x,2), j=1:size(x,1)]
 end
 
 function stage(ctx, node::Transpose)
     inp = cached_stage(ctx, node.input)
-    dmn = domain(inp)
-    dmnT = dmn'
     thunks = _ctranspose(chunks(inp))
-    Cat(parttype(inp), dmnT, thunks)
+    Cat(chunktype(inp), domain(inp)', domainchunks(inp)', thunks)
 end
 
 export Distribute
 
 immutable Distribute{N, T} <: LazyArray{N, T}
-    domain::DomainSplit
+    domainchunks
     data::AbstractChunk
 end
 
-Distribute(d::DomainSplit, p::AbstractChunk) =
-    Distribute{eltype(parttype(p)), ndims(d)}(d, p)
-
-size(x::Distribute) = size(x.domain)
-
-
-Distribute(dmn::DomainSplit, data) =
+Distribute(dmn, data) =
     Distribute(dmn, persist!(tochunk(data)))
+
+Distribute(d, p::AbstractChunk) =
+    Distribute{eltype(chunktype(p)), ndims(d)}(d, p)
+
+size(x::Distribute) = size(domain(x.data))
+
 
 Distribute(p::Blocks, data) =
     Distribute(partition(p, domain(data)), data)
@@ -91,7 +85,10 @@ end
 =#
 
 function stage(ctx, d::Distribute)
-    Cat(parttype(d.data), d.domain, map(c -> view(d.data, c), chunks(d.domain)))
+    Cat(chunktype(d.data),
+        domain(d.data),
+        d.domainchunks,
+        map(c -> view(d.data, c), d.domainchunks))
 end
 
 
@@ -132,10 +129,6 @@ function (*)(a::ArrayDomain{2}, b::ArrayDomain{1})
     ArrayDomain((indexes(a)[1],))
 end
 
-function (*)(a::DomainSplit, b::DomainSplit)
-    DomainSplit(head(a)*head(b), chunks(a) * chunks(b))
-end
-
 function (*)(a::Blocks{2}, b::Blocks{2})
     Blocks(a.blocksize[1], b.blocksize[2])
 end
@@ -149,8 +142,8 @@ function (+)(a::ArrayDomain, b::ArrayDomain)
     a
 end
 
-(*)(a::AbstractChunk, b::AbstractChunk) = Thunk(*, (a,b))
-(+)(a::AbstractChunk, b::AbstractChunk) = Thunk(+, (a,b))
+(*)(a::AbstractChunk, b::AbstractChunk) = Thunk(*, a,b)
+(+)(a::AbstractChunk, b::AbstractChunk) = Thunk(+, a,b)
 
 # we define our own matmat and matvec multiply
 # for computing the new domains and thunks.
@@ -186,11 +179,10 @@ function promote_distribution(ctx, m::MatMul, a,b)
         return a,b
     end
 
-    pa = chunks(domain(a))
-    pb = chunks(domain(b))
+    pa = domainchunks(a)
+    pb = domainchunks(b)
 
-    d = DomainSplit(head(domain(b)),
-       BlockedDomains((1,1), (pa.cumlength[2], pb.cumlength[2])))
+    d = DomainBlocks((1,1), (pa.cumlength[2], pb.cumlength[2])) # FIXME: this is not generic
     a, cached_stage(ctx, Distribute(d, b))
 end
 
@@ -211,12 +203,12 @@ an operand which should be distributed as per convenience
 function stage_operands{T}(ctx, ::MatMul, a::LazyArray, b::PromotePartition{T,1})
     stg_a = cached_stage(ctx, a)
     dmn_a = domain(stg_a)
+    dchunks_a = domainchunks(stg_a)
     dmn_b = domain(b.data)
     if size(dmn_a, 2) != size(dmn_b, 1)
         throw(DimensionMismatch("Cannot promote array of domain $(dmn_b) to multiply with an array of size $(dmn_a)"))
     end
-    ps = chunks(dmn_a)
-    dmn_out = DomainSplit(dmn_b, BlockedDomains((1,),(ps.cumlength[2],)))
+    dmn_out = DomainBlocks((1,),(dchunks_a.cumlength[2],))
 
     stg_a, cached_stage(ctx, Distribute(dmn_out, tochunk(b.data)))
 end
@@ -228,20 +220,16 @@ function stage_operands(ctx, ::MatMul, a::PromotePartition, b::LazyArray)
     end
     stg_b = cached_stage(ctx, b)
 
-    ps = chunks(domain(stg_b))
-    dmn_out = DomainSplit(domain(a.data),
-        BlockedDomains((1,1),([size(a.data, 1)], ps.cumlength[1],)))
+    ps = domainchunks(stg_b)
+    dmn_out = DomainBlocks((1,1),([size(a.data, 1)], ps.cumlength[1],))
     cached_stage(ctx, Distribute(dmn_out, tochunk(a.data))), stg_b
 end
 
 function stage(ctx, mul::MatMul)
     a, b = stage_operands(ctx, mul, mul.a, mul.b)
 
-    da = domain(a)
-    db = domain(b)
-
-    d = da*db
-    Cat(Any, d, _mul(chunks(a), chunks(b); T=Thunk))
+    Cat(Any, domain(a)*domain(b),
+        domainchunks(a)*domainchunks(b), _mul(chunks(a), chunks(b); T=Thunk))
 end
 
 
@@ -263,11 +251,9 @@ scale(l::Vector, r::LazyArray) = scale(PromotePartition(l), r)
 scale(l::LazyArray, r::LazyArray) = Scale(l, r)
 
 function stage_operand(ctx, ::Scale, a, b::PromotePartition)
-    ps = chunks(domain(a))
-    b_parts = BlockedDomains((1,), (ps.cumlength[1],))
-    head = ArrayDomain(1:size(domain(a), 1))
-    b_dmn = DomainSplit(head, b_parts)
-    cached_stage(ctx, Distribute(b_dmn, tochunk(b.data)))
+    ps = domainchunks(a)
+    b_parts = DomainBlocks((1,), (ps.cumlength[1],))
+    cached_stage(ctx, Distribute(b_parts, tochunk(b.data)))
 end
 
 function stage_operand(ctx, ::Scale, a, b)
@@ -277,7 +263,7 @@ end
 function _scale(l, r)
     res = similar(r, Any)
     for i=1:length(l)
-        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, (l[i], x)), r[i,:])
+        res[i,:] = map(x->Thunk((a,b) -> Diagonal(a)*b, l[i], x), r[i,:])
     end
     res
 end
@@ -289,7 +275,7 @@ function stage(ctx, scal::Scale)
     @assert size(domain(r), 1) == size(domain(l), 1)
 
     scal_parts = _scale(chunks(l), chunks(r))
-    Cat(Any, domain(r), scal_parts)
+    Cat(Any, domain(r), domainchunks(r), scal_parts)
 end
 
 immutable Concat{T,N} <: LazyArray{T,N}
@@ -306,15 +292,13 @@ function size(c::Concat)
     (sz...,)
 end
 
-function cat(idx::Int, ds::DomainSplit...)
-    h = head(ds[1])
+function cat(idx::Int, ds::ArrayDomain...)
+    h = (ds[1])
     out_idxs = [x for x in indexes(h)]
     len = sum(map(x->length(indexes(x)[idx]), ds))
     fst = first(out_idxs[idx])
     out_idxs[idx] = fst:(fst+len-1)
-    out_head = ArrayDomain(out_idxs)
-    out_parts = cumulative_domains(cat(idx, map(chunks, ds)...))
-    DomainSplit(out_head, out_parts)
+    ArrayDomain(out_idxs)
 end
 
 function stage(ctx, c::Concat)
@@ -327,9 +311,10 @@ function stage(ctx, c::Concat)
     end
 
     dmn = cat(c.axis, dmns...)
+    dmnchunks = cumulative_domains(cat(c.axis, map(domainchunks, inp)...))
     thunks = cat(c.axis, map(chunks, inp)...)
-    T = promote_type(map(parttype, inp)...)
-    Cat(T, dmn, thunks)
+    T = promote_type(map(chunktype, inp)...)
+    Cat(T, dmn, dmnchunks, thunks)
 end
 
 Base.cat(idx::Int, x::LazyArray, xs::LazyArray...) =

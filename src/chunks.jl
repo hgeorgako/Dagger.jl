@@ -28,14 +28,14 @@ function gather end
 A chunk with some data
 """
 type Chunk{I<:ChunkIO} <: AbstractChunk
-    parttype::Type
+    chunktype::Type
     domain::Domain
     handle::I
     persist::Bool
 end
 
 domain(c::Chunk) = c.domain
-parttype(c::Chunk) = c.parttype
+chunktype(c::Chunk) = c.chunktype
 persist!(t::Chunk) = (t.persist=true; t)
 shouldpersist(p::Chunk) = t.persist
 function gather(ctx, chunk::Chunk)
@@ -70,14 +70,14 @@ Fields:
  - chunk: The chunk being viewed
 """
 type View{T<:AbstractChunk} <: AbstractChunk
-    parttype::Type
+    chunktype::Type
     domain::Domain
     subdomain::Domain
     chunk::T
 end
 
 domain(c::View) = c.domain
-parttype(c::View) = c.parttype
+chunktype(c::View) = c.chunktype
 persist!(x::View) = persist!(x.chunk)
 
 function gather(ctx, s::View)
@@ -98,7 +98,7 @@ end
 
 Returns the `View` object which represents a view chunk of `a`
 """
-function view(p::Chunk, d::Domain, T=parttype(p))
+function view(p::Chunk, d::Domain, T=chunktype(p))
 
     if domain(p) == d
         return p
@@ -117,39 +117,41 @@ end
 A collection of Parts put together to form a bigger logical chunk
 
 Fields:
- - parttype: The type of the data represented by the Cat
- - domain: The domain of the combined chunk and chunks (`DomainSplit`)
+ - chunktype: The type of the data represented by the Cat
+ - domain: The domain of the concatenated Chunk
  - chunks: the chunks which form the chunks of the Cat
 """
 type Cat <: AbstractChunk
-    parttype::Type
-    domain::DomainSplit
-    chunks::AbstractArray
+    chunktype::Type
+    domain::Domain
+    domainchunks
+    chunks
 end
 
 domain(c::Cat) = c.domain
-parttype(c::Cat) = c.parttype
+chunktype(c::Cat) = c.chunktype
 chunks(x::Cat) = x.chunks
+domainchunks(x::Cat) = x.domainchunks
 persist!(x::Cat) = (for p in chunks(x); persist!(p); end)
 
 function gather(ctx, chunk::Cat)
     ps_input = chunks(chunk)
-    ps = Array{parttype(chunk)}(size(ps_input))
+    ps = Array{chunktype(chunk)}(size(ps_input))
     @sync for i in 1:length(ps_input)
         @async ps[i] = gather(ctx, ps_input[i])
     end
-    cat_data(parttype(chunk), chunk.domain, ps)
+    cat_data(chunktype(chunk), domain(chunk), domainchunks(chunk), ps)
 end
 
 """
 `view` of a `Cat` chunk returns a `Cat` of view chunks
 """
 function view(c::Cat, d)
-    sub_parts, subdomains = lookup_parts(chunks(c), chunks(domain(c)), d)
-    if length(sub_parts) == 1
-        sub_parts[1]
+    subchunks, subdomains = lookup_parts(chunks(c), domainchunks(c), d)
+    if length(subchunks) == 1
+        subchunks[1]
     else
-        Cat(parttype(c), DomainSplit(alignfirst(d), subdomains), sub_parts)
+        Cat(chunktype(c), alignfirst(d), subdomains, subchunks)
     end
 end
 
@@ -186,7 +188,7 @@ function group_indices(cumlength, idxs::Range)
 end
 
 _cumsum(x::AbstractArray) = length(x) == 0 ? Int[] : cumsum(x)
-function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::ArrayDomain{N})
+function lookup_parts{N}(ps::AbstractArray, subdmns::DomainBlocks{N}, d::ArrayDomain{N})
     groups = map(group_indices, subdmns.cumlength, indexes(d))
     sz = map(length, groups)
     pieces = Array{AbstractChunk}(sz)
@@ -197,7 +199,7 @@ function lookup_parts{N}(ps::AbstractArray, subdmns::BlockedDomains{N}, d::Array
         pieces[i] = view(ps[idx...], project(subdmns[idx...], dmn))
     end
     out_cumlength = map(g->_cumsum(map(x->length(x[2]), g)), groups)
-    out_dmn = BlockedDomains(ntuple(x->1,Val{N}), out_cumlength)
+    out_dmn = DomainBlocks(ntuple(x->1,Val{N}), out_cumlength)
     pieces, out_dmn
 end
 
@@ -221,3 +223,4 @@ Base.@deprecate_binding Part Chunk
 Base.@deprecate_binding Sub  View
 Base.@deprecate parts(args...) chunks(args...)
 Base.@deprecate part(args...) tochunk(args...)
+Base.@deprecate parttype(args...) chunktype(args...)
