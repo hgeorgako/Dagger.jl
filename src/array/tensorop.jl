@@ -7,6 +7,15 @@ import Base: eltype
 
 include("util.jl")
 
+"""
+`Iter(A, (idx...))`
+
+Represents iteration over an N dimensional array A, with N `idx`
+Each index could be either:
+- `IterSym{:sym}()` object: denotes iteration using `sym` as the iteration index
+- `IterConst{T}(val::T)` object: denotes a constant in that dimension
+                                 (e.g.this would be wrapping an Int in case of reducedim)
+"""
 immutable Iter{A, I}
     A::A
     idx::I # Tuple of Union{IterSym, IterConst}
@@ -20,6 +29,15 @@ immutable IterConst{T}
 end
 
 
+"""
+`Map(f, (Xs...))`
+
+Represents application of function `f` on `Iter` or `ConstArg` objects in `Xs`.
+
+For example `A[i]*B[j]*42` would lower to:
+
+`Map(*, Iter(A, IterSym{:i}()), Iter(B, IterSym{:j}()), ConstArg{Int}(42))`
+"""
 immutable Map{F, Ts}
     f::F
     Xs::Ts # Tuple of Union{Iter, ConstArg}
@@ -31,27 +49,47 @@ immutable ConstArg{T}
     val::T
 end
 
+"""
+`Reduce(idx::IterSym, f, X, empty=default_identity)`
+
+Represents reduction of dimension indexed by `idx` in `X` using
+the function `f`, and `empty` as the identity value.
+
+`X` isa `Union{Iter, Map, Reduce}`
+"""
 immutable Reduce{idx, F, T, E}
     f::F
     X::T
     empty::E
 end
 
-function Reduce{I<:IterSym,F,T}(dim::I, f::F, X::T)
-    ident = reduce_identity(f, eltype(X))
+function Reduce{I<:IterSym,F,T}(dim::I, f::F, X::T, empty=reduce_identity(f, eltype(X)))
     Reduce{I,F,T, typeof(ident)}(f,X,ident)
 end
 
 eltype{dim,F,T,E}(itr::Reduce{dim, F,T,E}) = output_type(itr.f, (E, eltype(itr.X)))
+
+"""
+`reduce_identity(f, T::Type)`
+
+Identity value for reducing a collection of `T` with function `f`
+"""
 reduce_identity{T}(f::typeof(+), ::Type{T}) = zero(T)
 reduce_identity{T}(f::typeof(*), ::Type{T}) = one(T)
 
+
+"""
+`TensorOp(lhs, rhs)`
+
+represents a tensor operation. `lhs` is an `Iter` representing the LHS of the tensor expression
+`rhs` isa `Union{Iter, Map, Reduce}`
+"""
 immutable TensorOp{L<:Iter,R}
     lhs::L
     rhs::R
 end
 
-# Lowering a tensor operation expression to Iter, Map, Reduce
+### Lowering a tensor operation expression to Iter, Map, Reduce ###
 
 function lower_index(idx, only_symbols=false)
     if isa(idx, Symbol)
@@ -64,15 +102,17 @@ function lower_index(idx, only_symbols=false)
     end
 end
 
-function lower_maps(expr)
+# lower Iter and Maps
+function lower_iter_maps(expr)
     @match expr begin
         A_[idx__] => :(Iter($A, ($(map(lower_index, idx)...),)))
-        f_(arg_)   => :(Map($f, ($(lower_maps(arg)),)))
-        f_(args__)  => :(Map($f, ($(reduce(vcat, [lower_maps(x) for x in args])...),)))
+        f_(arg_)   => :(Map($f, ($(lower_iter_maps(arg)),)))
+        f_(args__)  => :(Map($f, ($(reduce(vcat, [lower_iter_maps(x) for x in args])...),)))
         x_ => :(ConstArg($x))
     end
 end
 
+# Get a Dictionary of reduction functions
 function reduction_functions(reductions)
     @match reductions begin
         (i_=>f_) => Dict(i => f)
@@ -92,16 +132,18 @@ function lower(expr, reductions)
 
     # which indices iterate over which dimension of the input
     # idxdims = index_dim_map(ridxs) # TODO: use this to verify correct dimensions
-    lowered_maps = lower_maps(rhs)
+    lowered_maps = lower_iter_maps(rhs)
 
     # which indices are reduced over
     reduceddims = setdiff(flatten(cdr.(ridxs)), flatten(cdr.(lidxs)))
     reduce_dict = reduction_functions(reductions)
+
+    # lower reduces
     rhs_lowered = reduce(lowered_maps, reduceddims) do ex, idx
         :(Reduce($(lower_index(idx, true)), $(get(reduce_dict, idx, +)), $ex))
     end
 
-    :(TensorOp($(lower_maps(lhs)), $rhs_lowered))
+    :(TensorOp($(lower_iter_maps(lhs)), $rhs_lowered))
 end
 
 macro lower(expr, reductions=:nothing)
@@ -128,11 +170,22 @@ let
 end
 
 
+# TODO:
 """
-    top!(t::TensorOp)
+`top!(t::TensorOp)`
 
 Perform a tensor operation
 """
 function top!(x::TensorOp) x end
 
 
+# TODO:
+
+"""
+`optimize(t::TensorOp)`
+
+Optimize `t` to produce an equivalent `TensorOp`
+"""
+function optimize(t::TensorOp)
+    t
+end
