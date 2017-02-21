@@ -152,31 +152,24 @@ end
 
 let
     A = rand(2,2); B = rand(2,2); C = rand(2,2);
+    i, j, k = [IterSym{x}() for x in [:i,:j,:k]]
     # map
-    @test @lower(A[i,j] = B[i,j]) == TensorOp(Iter(A, (IterSym{:i}(), IterSym{:j}())), Iter(B, (IterSym{:i}(), IterSym{:j}())))
+    @test @lower(A[i,j] = B[i,j]) == TensorOp(Iter(A, (i, j)), Iter(B, (i, j)))
 
     # transpose
-    @test @lower(A[i,j] = B[j,i]) == TensorOp(Iter(A, (IterSym{:i}(), IterSym{:j}())), Iter(B, (IterSym{:j}(), IterSym{:i}())))
+    @test @lower(A[i,j] = B[j,i]) == TensorOp(Iter(A, (i, j)), Iter(B, (j, i)))
 
     # reduced over i:
-    @test @lower(A[j] = B[j,i])   == TensorOp(Iter(A, (IterSym{:j}(),)), Reduce(IterSym{:i}(), +, Iter(B, (IterSym{:j}(), IterSym{:i}()))))
+    @test @lower(A[j] = B[j,i])   == TensorOp(Iter(A, (j,)), Reduce(i, +, Iter(B, (j, i))))
 
     # reduced over i, output is reducedim
-    @test @lower(A[1,j] = B[i,j]) == TensorOp(Iter(A, (IterConst{Int}(1), IterSym{:j}())), Reduce(IterSym{:i}(), +, Iter(B, (IterSym{:i}(), IterSym{:j}()))))
+    @test @lower(A[1,j] = B[i,j]) == TensorOp(Iter(A, (IterConst{Int}(1), j)), Reduce(i, +, Iter(B, (i, j))))
 
     # reduce both dimensions, use * to reduce i and + to reduce j
     @test @lower(A[1,1] = B[i,j], [i=>*,j=>+]) == TensorOp(Iter(A, (IterConst{Int}(1), IterConst{Int}(1))),
-                                                           Reduce(IterSym{:j}(), +, Reduce(IterSym{:i}(), *, Iter(B, (IterSym{:i}(), IterSym{:j}())))))
+                                                           Reduce(j, +, Reduce(i, *, Iter(B, (i, j)))))
 end
 
-
-# TODO:
-"""
-`top!(t::TensorOp)`
-
-Perform a tensor operation
-"""
-function top!(x::TensorOp) x end
 
 
 # TODO:
@@ -211,7 +204,7 @@ function inner_expr{X, Idx}(name, itr::Type{Iter{X, Idx}}, state)
         if isa(j, Symbol)
             # store mapping from index symbol to dimension of tensor
             Base.@get! state.idx_to_dim j []
-            push!(state.idx_to_dim[j], (name, i))
+            push!(state.idx_to_dim[j], (:($name.A), i))
 
             if !(j in state.deferred_loops)
                 push!(state.deferred_loops, j)
@@ -265,7 +258,7 @@ let
     state = ConsState()
     tex = quote
               let acc = X.empty
-                  for k = 1:size(X.X.Xs[1],3)
+                  for k = 1:size(X.X.Xs[1].A,3)
                       acc = X.f(acc,X.X.f(X.X.Xs[1].A[i,j,k]))
                   end
                   acc
@@ -275,3 +268,53 @@ let
     @test inner_expr(:X, testtype(@lower(X[i,j] = -Y[i,j,k])), ConsState())|>striplines|>string  == string(tex)
 end
 
+allequal(x) = true
+function allequal(x, xs...)
+    x == xs[1] && allequal(xs...)
+end
+
+function tensorop_body{L,R}(name, top::Type{TensorOp{L,R}})
+    state = ConsState()
+    rhs_inner = inner_expr(:($name.rhs), R, state)
+    lhs_inner = inner_expr(:($name.lhs), L, state)
+
+    # wrap with loops
+    expr = :($lhs_inner = $rhs_inner)
+    checks = :()
+    for sym in reverse(state.deferred_loops)
+        if !haskey(state.idx_to_dim, sym)
+            throw(ArgumentError("Unknown dimension $sym"))
+        end
+        dims = state.idx_to_dim[sym]
+        if length(dims) > 1
+            # check dimensions for equality
+            equal_dims = [:(size($(d...))) for d in dims]
+            checks = :($checks; @assert allequal($(equal_dims...),))
+        end
+        dim = first(dims)
+        expr = quote
+            for $sym = 1:size($(dim...))
+                $expr
+            end
+        end
+    end
+    :($checks; $expr; $name.lhs.A)
+end
+
+@generated function top!(t::TensorOp)
+    tensorop_body(:t, t)
+end
+
+"""
+`top!(t::TensorOp)`
+
+Perform a tensor operation
+"""
+macro top(expr, reductions=:nothing)
+    :(top!(@lower $expr $reductions))
+end
+
+let
+    A=rand(2,2); B=rand(2,2); C=rand(2,2);
+    @test @top(A[i,j]=B[i,k]*C[k,j]) == B*C
+end
