@@ -64,7 +64,7 @@ immutable Reduce{idx, F, T, E}
 end
 
 function Reduce{I<:IterSym,F,T}(dim::I, f::F, X::T, empty=reduce_identity(f, eltype(X)))
-    Reduce{I,F,T, typeof(ident)}(f,X,ident)
+    Reduce{I,F,T, typeof(empty)}(f,X,empty)
 end
 
 eltype{dim,F,T,E}(itr::Reduce{dim, F,T,E}) = output_type(itr.f, (E, eltype(itr.X)))
@@ -189,3 +189,89 @@ Optimize `t` to produce an equivalent `TensorOp`
 function optimize(t::TensorOp)
     t
 end
+
+### Construction of loop expressions in type domain
+### This is the fallback implementation for AbstractArrays
+
+index_expr{x}(name, ::Type{IterSym{x}}, i) = x
+index_expr{C<:IterConst}(name, ::Type{C}, i) = :($name.idx[$i].val)
+
+immutable ConsState
+    idx_to_dim::Dict         # used to generate size checks
+    deferred_loops::Vector   # used to defer iterations to outer expression
+end
+ConsState() = ConsState(Dict(), [])
+
+function inner_expr{X, Idx}(name, itr::Type{Iter{X, Idx}}, state)
+    idxs = []
+
+    for (i, idx) in  enumerate(Idx.parameters)
+        j = index_expr(name, idx, i)
+        push!(idxs, j)
+        if isa(j, Symbol)
+            # store mapping from index symbol to dimension of tensor
+            Base.@get! state.idx_to_dim j []
+            push!(state.idx_to_dim[j], (name, i))
+
+            if !(j in state.deferred_loops)
+                push!(state.deferred_loops, j)
+            end
+        end
+    end
+
+    :($name.A[$(idxs...)])
+end
+
+let
+    X = rand(2,2);
+    testtype(x) = typeof(x.rhs)
+    state = ConsState()
+    @test inner_expr(:X, testtype(@lower(X[i,j,k] = X[i,j,k])), ConsState())|>string == :(X.A[i,j,k])|>string
+    @test inner_expr(:X, testtype(@lower(X[i,j,1] = X[i,j,1])), ConsState())|>string == :(X.A[i,j,X.idx[3].val])|>string
+end
+
+function inner_expr{F, Ts}(name, itr::Type{Map{F, Ts}}, state)
+    innerexprs = [inner_expr(:($name.Xs[$i]), T, state) for (i, T) in enumerate(Ts.parameters)]
+    :($name.f($(innerexprs...)))
+end
+let
+    X = rand(2,2);
+    Y = rand(2,2);
+    testtype(x) = typeof(x.rhs)
+    state = ConsState()
+    @test inner_expr(:X, testtype(@lower(X[i,j,k] = -Y[i,j,k])), ConsState())|>string == :(X.f(X.Xs[1].A[i,j,k]))|>string
+    @test inner_expr(:X, testtype(@lower(X[i,j,k] = X[i,k,j]-Y[i,j,k])), ConsState())|>string == :(X.f(X.Xs[1].A[i,k,j], X.Xs[2].A[i,j,k]))|>string
+end
+
+function inner_expr{idx, F, T, E}(name, itr::Type{Reduce{IterSym{idx}, F, T, E}}, state)
+    inner = inner_expr(:($name.X), T, state)
+    !haskey(state.idx_to_dim, idx) && throw(ArgumentError("Reduced dimension $idx unknown"))
+    dim = first(state.idx_to_dim[idx])
+    quote
+        let acc = $name.empty
+            for $idx = 1:size($(dim...))
+                acc = $name.f(acc, $inner)
+            end
+            acc
+        end
+    end
+end
+
+import MacroTools: striplines
+let
+    X = rand(2,2);
+    Y = rand(2,2);
+    testtype(x) = typeof(x.rhs)
+    state = ConsState()
+    tex = quote
+              let acc = X.empty
+                  for k = 1:size(X.X.Xs[1],3)
+                      acc = X.f(acc,X.X.f(X.X.Xs[1].A[i,j,k]))
+                  end
+                  acc
+              end
+          end|>striplines
+
+    @test inner_expr(:X, testtype(@lower(X[i,j] = -Y[i,j,k])), ConsState())|>striplines|>string  == string(tex)
+end
+
