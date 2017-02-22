@@ -14,7 +14,9 @@ include("tensorop.jl")
 function equivalent_chunks(X::Iter)
     # An iterator on the chunks of iterators
     # TODO: handle IterConsts
-    Iter(map(c -> Thunk(x -> Iter(x, X.idx), c), chunks(X.A)), X.idx)
+    let idx = X.idx
+        Iter(map(c -> Thunk(x -> Iter(x, idx), c), chunks(X.A)), X.idx)
+    end
 end
 
 function equivalent_chunks(X::Map)
@@ -24,14 +26,14 @@ function equivalent_chunks(X::Map)
     end
 end
 
+
 function equivalent_chunks{dim}(X::Reduce{dim})
-    @show dim
     let f = X.f
         # Reduce each chunk first
-        reduced_chunks = map(c -> Thunk(x -> Reduce(dim(), f, x), c), equivalent_chunks(X.X))
+        reduced_chunks = Map(c -> Thunk(x -> Reduce(dim(), f, x), c), (equivalent_chunks(X.X),))
 
         # reduce the chunks array
-        Reduce(dim(), (x,y) -> Thunk((p, q) -> Reduce(dim(), f, DimCat(dim(), p, q)), x, y),
+        Reduce(dim(), (x,y) -> Thunk((a,b)->Map(f, (a, b)), x, y),
             reduced_chunks, Thunk(()->nothing)) # must be made tree reduce
     end
 end
@@ -41,9 +43,10 @@ function equivalent_chunks(itr::TensorOp)
 end
 
 function dtop!(t::TensorOp)
-    chunks = top!(equivalent_chunks(t))
-    chunksA = chunks(t.lhs.A)
-    chunksA = map(c -> Thunk(c -> top!(c)), chunksA)
+    cs = top!(equivalent_chunks(t))
+    L(x) = Iter(x, t.lhs.idx)
+    chunksA = map(c -> Thunk(x -> top!(TensorOp(L(Array(Float64, 2,2)), x)), c), cs)
+    t.lhs.A.result.chunks = chunksA
     t.lhs.A
 end
 
@@ -66,6 +69,5 @@ let
 
     @dtop A[i,j] = B[i,k]*C[k,j]
     map(gather, chunks(A))
-    @test gather(D) == gather(A)
-    @test gather(A) == gather(B)*gather(C)
+    @test gather(A) ≈ gather(B)*gather(C)
 end
