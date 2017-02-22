@@ -241,8 +241,8 @@ function inner_expr{idx, F, T, E}(name, itr::Type{Reduce{IterSym{idx}, F, T, E}}
     !haskey(state.idx_to_dim, idx) && throw(ArgumentError("Reduced dimension $idx unknown"))
     dim = first(state.idx_to_dim[idx])
     quote
-        let acc = $name.empty
-            for $idx = 1:size($(dim...))
+        let $idx = 1, acc = $inner
+            for $idx = 2:size($(dim...))
                 acc = $name.f(acc, $inner)
             end
             acc
@@ -257,8 +257,8 @@ let
     testtype(x) = typeof(x.rhs)
     state = ConsState()
     tex = quote
-              let acc = X.empty
-                  for k = 1:size(X.X.Xs[1].A,3)
+            let k = 1, acc = X.X.f(X.X.Xs[1].A[i,j,k])
+                  for k = 2:size(X.X.Xs[1].A,3)
                       acc = X.f(acc,X.X.f(X.X.Xs[1].A[i,j,k]))
                   end
                   acc
