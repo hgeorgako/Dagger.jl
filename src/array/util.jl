@@ -27,3 +27,36 @@ function index_dim_map(xs)
     end
     iters
 end
+
+"""
+Type Domain `promote_op`
+
+The first argument is the type of the function
+"""
+@generated function promote_op_t{F,T}(::Type{F}, ::Type{T})
+    :(_promote_op_t(F, $(T.parameters...)))
+end
+
+# Dummy type to imitate a splatted function application
+# This is passed into Inference.return_type
+immutable _F{G}
+    g::G
+end
+(f::_F{G}){G}(x) = f.g(x...)
+
+f(g) = x->g(x...)
+
+# the equivalent to Base._promote_op
+function _promote_op_t(F, T::ANY)
+    G = Tuple{Base.Generator{Tuple{T},F}}
+    Core.Inference.return_type(first, G)
+end
+
+function _promote_op_t(F, R::ANY, S::ANY)
+    G = Tuple{Base.Generator{Base.Zip2{Tuple{R},Tuple{S}},_F{F}}}
+    Core.Inference.return_type(first, G)
+end
+
+function _promote_op_t(F, R::ANY, S::ANY, T::ANY...)
+    _promote_op_t(F, _promote_op_t(F, R, S), T...)
+end
