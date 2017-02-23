@@ -20,7 +20,9 @@ immutable Iter{A, I}
     A::A
     idx::I # Tuple of Union{IterSym, IterConst}
 end
-eltype{A}(itr::Iter{A}) = eltype(A)
+
+eltype{A}(::Type{Iter{A}}) = eltype(A)
+arraytype{A}(::Type{Iter{A}}) = A
 
 immutable IterSym{d} end
 
@@ -28,6 +30,8 @@ immutable IterConst{T}
     val::T
 end
 
+
+###### Map ######
 
 """
 `Map(f, (Xs...))`
@@ -38,16 +42,29 @@ For example `A[i]*B[j]*42` would lower to:
 
 `Map(*, Iter(A, IterSym{:i}()), Iter(B, IterSym{:j}()), ConstArg{Int}(42))`
 """
-immutable Map{F, Ts}
+immutable Map{F, Ts<:Tuple}
     f::F
     Xs::Ts # Tuple of Union{Iter, ConstArg}
 end
-output_type(f::Function, Ts) = get(Base.return_types(f, Ts), 1, Any)
-eltype{F,Ts}(itr::Map{F, Ts}) = output_type(itr.f, map(eltype, itr.Xs))
 
+function eltype{F,Ts}(::Type{Map{F,Ts}})
+    Base.@_pure_meta
+    promote_op_t(F, etypes(Ts))
+end
+
+function arraytype{F,Ts}(::Type{Map{F, Ts}})
+    Base.@_pure_meta
+    promote_arraytype(F, Ts)
+end
+
+# A constant argument. We keep track of the type.
 immutable ConstArg{T}
     val::T
 end
+
+
+
+###### Reduce ######
 
 """
 `Reduce(idx::IterSym, f, X, empty=default_identity)`
@@ -227,6 +244,7 @@ function inner_expr{F, Ts}(name, itr::Type{Map{F, Ts}}, state)
     innerexprs = [inner_expr(:($name.Xs[$i]), T, state) for (i, T) in enumerate(Ts.parameters)]
     :($name.f($(innerexprs...)))
 end
+
 let
     X = rand(2,2);
     Y = rand(2,2);
@@ -273,6 +291,7 @@ function allequal(x, xs...)
     x == xs[1] && allequal(xs...)
 end
 
+
 function tensorop_body{L,R}(name, top::Type{TensorOp{L,R}})
     state = ConsState()
     rhs_inner = inner_expr(:($name.rhs), R, state)
@@ -301,7 +320,8 @@ function tensorop_body{L,R}(name, top::Type{TensorOp{L,R}})
     :($checks; $expr; $name.lhs.A)
 end
 
-@inline @generated function top!(t::TensorOp)
+@generated function top!(t::TensorOp)
+    @_inline_meta
     tensorop_body(:t, t)
 end
 

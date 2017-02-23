@@ -60,3 +60,28 @@ end
 function _promote_op_t(F, R::ANY, S::ANY, T::ANY...)
     _promote_op_t(F, _promote_op_t(F, R, S), T...)
 end
+
+@generated function eltypes{T<:Tuple}(::Type{T})
+    :(Tuple{$(map(eltype, T.paramters)...)})
+end
+
+### Promote the Array type of a ArrayExpr
+
+@generated function promote_arraytype{F,T<:Tuple}(::Type{F}, ::Type{T})
+    :(promote_arraytype(F, $(T.parameters...)))
+end
+
+function promote_arraytype{S<:Array, T<:AbstractArray}(::Type{S}, ::Type{T})
+    S
+end
+
+#=
+
+    # TODO
+
+    - Allocate automatically!!!
+    - Make sure we can generate different code for different array type combiniations
+    - Use this to generate code for sparse matrices
+    - Use the same to generate code for DArray
+
+=#
