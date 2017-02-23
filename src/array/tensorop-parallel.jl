@@ -4,14 +4,9 @@
 
 ### TODO: dispatch to choose back-end. For now, split this into dtensorop
 
-# @dtop _[i, j] = B[i, k] * C[k, j]
-#  ==
-#  @top _.chunks[i,j] = Map((chunkB, chunkC) -> @top(_[i, j] = chunkB[i, k] * chunkC[k, j]), @top B.chunks[i, k] C.chunks[k, j]
-#
-
 include("tensorop.jl")
 
-function equivalent_chunks(X::Iter)
+function onchunks(X::Iter)
     # An iterator on the chunks of iterators
     # TODO: handle IterConsts
     let idx = X.idx
@@ -19,18 +14,18 @@ function equivalent_chunks(X::Iter)
     end
 end
 
-function equivalent_chunks(X::Map)
+function onchunks(X::Map)
     let f = X.f
         Map((args...) -> Thunk((x...) -> Map(f, x), args...),
-            map(equivalent_chunks, X.Xs))
+            map(onchunks, X.Xs))
     end
 end
 
 
-function equivalent_chunks{dim}(X::Reduce{dim})
+function onchunks{dim}(X::Reduce{dim})
     let f = X.f
         # Reduce each chunk first
-        reduced_chunks = Map(c -> Thunk(x -> Reduce(dim(), f, x), c), (equivalent_chunks(X.X),))
+        reduced_chunks = Map(c -> Thunk(x -> Reduce(dim(), f, x), c), (onchunks(X.X),))
 
         # reduce the chunks array
         Reduce(dim(), (x,y) -> Thunk((a,b)->Map(f, (a, b)), x, y),
@@ -38,12 +33,12 @@ function equivalent_chunks{dim}(X::Reduce{dim})
     end
 end
 
-function equivalent_chunks(itr::TensorOp)
-    TensorOp(equivalent_chunks(itr.lhs), equivalent_chunks(itr.rhs))
+function onchunks(itr::TensorOp)
+    TensorOp(onchunks(itr.lhs), onchunks(itr.rhs))
 end
 
 function dtop!(t::TensorOp)
-    cs = top!(equivalent_chunks(t))
+    cs = top!(onchunks(t))
     L(x) = Iter(x, t.lhs.idx)
     chunksA = map(c -> Thunk(x -> top!(TensorOp(L(Array(Float64, 2,2)), x)), c), cs)
     t.lhs.A.result.chunks = chunksA
@@ -68,6 +63,5 @@ let
     D = compute(D)
 
     @dtop A[i,j] = B[i,k]*C[k,j]
-    map(gather, chunks(A))
     @test gather(A) ≈ gather(B)*gather(C)
 end

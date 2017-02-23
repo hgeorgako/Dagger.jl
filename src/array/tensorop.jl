@@ -301,7 +301,7 @@ function tensorop_body{L,R}(name, top::Type{TensorOp{L,R}})
     :($checks; $expr; $name.lhs.A)
 end
 
-@generated function top!(t::TensorOp)
+@inline @generated function top!(t::TensorOp)
     tensorop_body(:t, t)
 end
 
