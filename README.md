@@ -52,7 +52,7 @@ In this example, we will compute the sum of square of a 10000x10000 normally dis
 
 ```julia
 x = randn(Blocks(4000,4000), 10^4, 10^4)
-sum(x.^2)
+compute(sum(x.^2))
 # => 1.0000084097623596e8
 ```
 the answer is close to 10^8. Note the use of `compute` on `sum`. This is because `sum` returns an object representing the computation of the sum. You need to call compute on it to actually compute it.
